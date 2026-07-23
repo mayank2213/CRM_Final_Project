@@ -9,6 +9,7 @@ Mayank's foundation half of the capstone. Uday's pipeline, stage-history, activi
 - A contact belongs to one company.
 - Activities are structured as call, email, note, or meeting and can attach to a deal/contact.
 - Deal value is numeric and ready for currency display in the pipeline half.
+- Contacts are created and edited from one shared modal and must always link to an accessible company.
 
 ## Theme handoff
 

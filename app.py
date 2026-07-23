@@ -213,10 +213,22 @@ def save_contact():
     values = (request.form["name"].strip(), request.form.get("email", "").strip(), request.form.get("phone", "").strip(), request.form.get("title", "").strip(), request.form["company_id"])
     if not values[0] or not values[4]:
         flash("Name and company are required.", "danger")
-    elif contact_id:
-        db.execute("UPDATE contacts SET name=?,email=?,phone=?,title=?,company_id=? WHERE id=?", (*values, contact_id)); db.commit(); flash("Contact updated.", "success")
     else:
-        db.execute("INSERT INTO contacts(name,email,phone,title,company_id,owner_id) VALUES(?,?,?,?,?,?)", (*values, g.user["id"])); db.commit(); flash("Contact created.", "success")
+        company_where, company_params = visible_filter("companies")
+        company_query = f"SELECT id FROM companies{company_where} AND id = ?" if company_where else "SELECT id FROM companies WHERE id = ?"
+        company = db.execute(company_query, (*company_params, values[4])).fetchone()
+        if company is None:
+            flash("Choose a company you are allowed to use.", "danger")
+        elif contact_id:
+            owner_clause = "" if g.user["role"] == "manager" else " AND owner_id = ?"
+            owner_params = () if g.user["role"] == "manager" else (g.user["id"],)
+            result = db.execute(f"UPDATE contacts SET name=?,email=?,phone=?,title=?,company_id=? WHERE id=?{owner_clause}", (*values, contact_id, *owner_params))
+            if result.rowcount == 0:
+                flash("Contact not found or access denied.", "danger")
+            else:
+                db.commit(); flash("Contact updated.", "success")
+        else:
+            db.execute("INSERT INTO contacts(name,email,phone,title,company_id,owner_id) VALUES(?,?,?,?,?,?)", (*values, g.user["id"])); db.commit(); flash("Contact created.", "success")
     return redirect(url_for("contacts"))
 
 

@@ -18,6 +18,14 @@ The connected GitHub integration returned `403 Resource not accessible by integr
 
 **Acceptance:** Moving a deal through stages creates ordered audit rows; board and detail paths behave consistently; activities persist newest-first; direct URL access respects visibility; seed data spans all stages; shared palette, Bootstrap Icons, and Add/Edit modal pattern are preserved.
 
+## Issue 3 — Mayank (added after the initial split)
+
+**Title:** `Contact CRUD`
+
+**Scope:** Add, list, and edit contacts; require a company link; use one shared Add/Edit modal with Bootstrap Icons-only controls and the shared palette.
+
+**Acceptance:** A contact can be created with a company, appears in the contacts list with company details, can be edited from the same modal, and cannot be linked to a company outside the current user's visibility scope.
+
 ## Integration follow-up
 
 After both issues are complete, open an integration issue/PR to merge schema assumptions, run the full acceptance checklist, and document the diff-review correction for the common failure where stage history is written only from the board path and not direct deal edits.
