@@ -1,2 +1,2 @@
-Flask>=3.0,<4
-pymssql>=2.3,<3
+Flask
+pymssql
