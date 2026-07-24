@@ -212,24 +212,28 @@ def init_db():
 def seed_db():
     init_db()
     db = get_db()
-    if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
-        return
-    db.executemany("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,?)", [
-        ("Mayank", "mayank@example.com", generate_password_hash("demo123"), "manager"),
-        ("Uday", "uday@example.com", generate_password_hash("demo123"), "rep"),
-    ])
-    db.executemany("INSERT INTO pipeline_stages(name,sort_order) VALUES(?,?)", [(name, i) for i, name in enumerate(PIPELINE_STAGES)])
+    if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        db.executemany("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,?)", [
+            ("Mayank", "mayank@example.com", generate_password_hash("demo123"), "manager"),
+            ("Uday", "uday@example.com", generate_password_hash("demo123"), "rep"),
+        ])
+    for index, name in enumerate(PIPELINE_STAGES):
+        if not db.execute("SELECT id FROM pipeline_stages WHERE name=?", (name,)).fetchone():
+            db.execute("INSERT INTO pipeline_stages(name,sort_order) VALUES(?,?)", (name, index))
     manager = db.execute("SELECT id FROM users WHERE email='mayank@example.com'").fetchone()[0]
-    companies = [("Northstar Labs", "SaaS", "https://northstar.example", "Expansion-ready account", manager), ("Greenline Retail", "Retail", "https://greenline.example", "Needs quarterly review", manager), ("Bluebird Health", "Healthcare", "", "", manager), ("Orbit Logistics", "Logistics", "", "", manager), ("Cedar Finance", "Finance", "", "", manager)]
-    db.executemany("INSERT INTO companies(name,industry,website,notes,owner_id) VALUES(?,?,?,?,?)", companies)
+    if not db.execute("SELECT 1 FROM companies LIMIT 1").fetchone():
+        companies = [("Northstar Labs", "SaaS", "https://northstar.example", "Expansion-ready account", manager), ("Greenline Retail", "Retail", "https://greenline.example", "Needs quarterly review", manager), ("Bluebird Health", "Healthcare", "", "", manager), ("Orbit Logistics", "Logistics", "", "", manager), ("Cedar Finance", "Finance", "", "", manager)]
+        db.executemany("INSERT INTO companies(name,industry,website,notes,owner_id) VALUES(?,?,?,?,?)", companies)
     company_rows = db.execute("SELECT id,name FROM companies ORDER BY id").fetchall()
-    contacts = [("Aarav Mehta", "aarav@northstar.example", "+91 90000 10001", "VP Sales", 0), ("Riya Shah", "riya@greenline.example", "+91 90000 10002", "Operations Lead", 1), ("Nikhil Rao", "nikhil@bluebird.example", "", "Director", 2), ("Sara Khan", "sara@orbit.example", "", "Buyer", 3), ("Dev Patel", "dev@cedar.example", "", "CFO", 4)]
-    db.executemany("INSERT INTO contacts(name,email,phone,title,company_id,owner_id) VALUES(?,?,?,?,?,?)", [(n,e,p,t,company_rows[i][0],manager) for n,e,p,t,i in contacts])
+    if not db.execute("SELECT 1 FROM contacts LIMIT 1").fetchone():
+        contacts = [("Aarav Mehta", "aarav@northstar.example", "+91 90000 10001", "VP Sales", 0), ("Riya Shah", "riya@greenline.example", "+91 90000 10002", "Operations Lead", 1), ("Nikhil Rao", "nikhil@bluebird.example", "", "Director", 2), ("Sara Khan", "sara@orbit.example", "", "Buyer", 3), ("Dev Patel", "dev@cedar.example", "", "CFO", 4)]
+        db.executemany("INSERT INTO contacts(name,email,phone,title,company_id,owner_id) VALUES(?,?,?,?,?,?)", [(n,e,p,t,company_rows[i][0],manager) for n,e,p,t,i in contacts])
     stage_ids = {row['name']: row['id'] for row in db.execute("SELECT * FROM pipeline_stages")}
     contact_rows = db.execute("SELECT id,company_id FROM contacts ORDER BY id").fetchall()
-    for i, stage in enumerate(PIPELINE_STAGES):
-        contact = contact_rows[i % len(contact_rows)]
-        db.execute("INSERT INTO deals(title,company_id,contact_id,value,stage_id,owner_id) VALUES(?,?,?,?,?,?)", (f"{stage} opportunity", contact['company_id'], contact['id'], (i + 1) * 15000, stage_ids[stage], manager))
+    if contact_rows and not db.execute("SELECT 1 FROM deals LIMIT 1").fetchone():
+        for i, stage in enumerate(PIPELINE_STAGES):
+            contact = contact_rows[i % len(contact_rows)]
+            db.execute("INSERT INTO deals(title,company_id,contact_id,value,stage_id,owner_id) VALUES(?,?,?,?,?,?)", (f"{stage} opportunity", contact['company_id'], contact['id'], (i + 1) * 15000, stage_ids[stage], manager))
     db.commit()
 
 
