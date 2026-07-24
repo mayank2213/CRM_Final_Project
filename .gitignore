@@ -3,3 +3,5 @@ __pycache__/
 *.py[cod]
 crm.sqlite3
 *.sqlite3-journal
+.env
+crm_error.log

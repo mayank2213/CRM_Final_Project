@@ -19,6 +19,12 @@ A Flask CRM for managing companies, contacts, deals, sales activity, and the com
 - SQLite database (`crm.sqlite3`), initialized and seeded automatically at first run
 - Bootstrap 5 and Bootstrap Icons
 
+## Database configuration
+
+The app uses SQLite by default, so it runs locally without an external server. The database file is `crm.sqlite3` and is created/seeded automatically on first start.
+
+For the shared SQL Server database, copy `.env.example` to `.env`, set `CRM_DB_DRIVER=sqlserver`, and fill in `DB_SERVER`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Never commit `.env` or put database credentials in Python source.
+
 ## Run locally on Windows
 
 Use the included launcher:

@@ -1,9 +1,10 @@
 import os
-import sqlite3
+import re
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
+import db as db_module
+from flask import Flask, abort, flash, g, has_app_context, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,36 +15,203 @@ app = Flask(__name__)
 app.config.update(SECRET_KEY=os.environ.get("CRM_SECRET_KEY", "dev-only-change-me"), DATABASE=DATABASE)
 
 
+class DbRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class CursorResult:
+    def __init__(self, rows, rowcount=None):
+        self._rows = [DbRow(row) if isinstance(row, dict) else row for row in rows]
+        self._index = 0
+        self._rowcount = rowcount
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def fetchone(self):
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    def fetchall(self):
+        rows = self._rows[self._index:]
+        self._index = len(self._rows)
+        return rows
+
+    @property
+    def rowcount(self):
+        return self._rowcount if self._rowcount is not None else len(self._rows)
+
+
+class SQLDbConnection:
+    def execute(self, sql, params=()):
+        normalized_sql = _normalize_sql(sql)
+        params = tuple(params or ())
+        if normalized_sql.lstrip().upper().startswith("SELECT"):
+            rows = db_module.select(normalized_sql, params)
+            return CursorResult(rows)
+        rowcount = db_module.query(normalized_sql, params)
+        return CursorResult([], rowcount=rowcount)
+
+    def executemany(self, sql, seq_of_params):
+        for params in seq_of_params:
+            self.execute(sql, params)
+        return self
+
+    def commit(self):
+        db_module.commit()
+
+    def rollback(self):
+        db_module.rollback()
+
+    def close(self):
+        return None
+
+
+def _normalize_sql(sql):
+    if db_module.backend_name() == "sqlite":
+        return sql.strip()
+    normalized = sql.strip()
+    normalized = normalized.replace("?", "%s")
+    normalized = normalized.replace("CURRENT_TIMESTAMP", "GETDATE()")
+    if re.search(r"\bSELECT\b.*?\bLIMIT\s+(\d+)\b", normalized, re.IGNORECASE | re.DOTALL):
+        normalized = re.sub(
+            r"\bSELECT\b(.*?)(?:\s+LIMIT\s+(\d+))\b",
+            lambda m: f"SELECT TOP {m.group(2)} {m.group(1).strip()}",
+            normalized,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    if re.match(r"^SELECT(?:\s+TOP\s+\d+)?\s+1\b", normalized, re.IGNORECASE):
+        normalized = re.sub(r"^SELECT(?:\s+TOP\s+\d+)?\s+1\b", "SELECT 1 AS exists_flag", normalized, count=1, flags=re.IGNORECASE)
+    return normalized
+
+
 def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(app.config["DATABASE"])
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
-    return g.db
+    if has_app_context():
+        if "db" not in g:
+            g.db = SQLDbConnection()
+        return g.db
+
+    if not hasattr(app, "_db"):
+        app._db = SQLDbConnection()
+    return app._db
 
 
 @app.teardown_appcontext
 def close_db(_error=None):
-    db = g.pop("db", None)
-    if db:
-        db.close()
+    if has_app_context():
+        g.pop("db", None)
 
 
 def init_db():
-    get_db().executescript("""
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('rep','manager')) DEFAULT 'rep');
-    CREATE TABLE IF NOT EXISTS companies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, industry TEXT, website TEXT, notes TEXT, owner_id INTEGER NOT NULL REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT, phone TEXT, title TEXT, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE, owner_id INTEGER NOT NULL REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS pipeline_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort_order INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, company_id INTEGER REFERENCES companies(id), contact_id INTEGER REFERENCES contacts(id), value REAL NOT NULL DEFAULT 0, stage_id INTEGER NOT NULL REFERENCES pipeline_stages(id), owner_id INTEGER NOT NULL REFERENCES users(id));
-    CREATE TABLE IF NOT EXISTS deal_stage_history (id INTEGER PRIMARY KEY AUTOINCREMENT, deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE, from_stage_id INTEGER REFERENCES pipeline_stages(id), to_stage_id INTEGER NOT NULL REFERENCES pipeline_stages(id), changed_by INTEGER NOT NULL REFERENCES users(id), changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS activities (id INTEGER PRIMARY KEY AUTOINCREMENT, deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE, contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE, activity_type TEXT NOT NULL CHECK(activity_type IN ('call','email','note','meeting')), body TEXT NOT NULL, author_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    """)
-    get_db().commit()
+    if db_module.backend_name() == "sqlite":
+        statements = [
+            """CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('rep','manager')) DEFAULT 'rep')""",
+            """CREATE TABLE IF NOT EXISTS companies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, industry TEXT, website TEXT, notes TEXT, owner_id INTEGER NOT NULL REFERENCES users(id))""",
+            """CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT, phone TEXT, title TEXT, company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE, owner_id INTEGER NOT NULL REFERENCES users(id))""",
+            """CREATE TABLE IF NOT EXISTS pipeline_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort_order INTEGER NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, company_id INTEGER REFERENCES companies(id), contact_id INTEGER REFERENCES contacts(id), value REAL NOT NULL DEFAULT 0, stage_id INTEGER NOT NULL REFERENCES pipeline_stages(id), owner_id INTEGER NOT NULL REFERENCES users(id))""",
+            """CREATE TABLE IF NOT EXISTS deal_stage_history (id INTEGER PRIMARY KEY AUTOINCREMENT, deal_id INTEGER NOT NULL REFERENCES deals(id) ON DELETE CASCADE, from_stage_id INTEGER REFERENCES pipeline_stages(id), to_stage_id INTEGER NOT NULL REFERENCES pipeline_stages(id), changed_by INTEGER NOT NULL REFERENCES users(id), changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS activities (id INTEGER PRIMARY KEY AUTOINCREMENT, deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE, contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE, activity_type TEXT NOT NULL CHECK(activity_type IN ('call','email','note','meeting')), body TEXT NOT NULL, author_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+        ]
+    else:
+        statements = [
+        """IF OBJECT_ID(N'dbo.users', N'U') IS NULL
+        BEGIN
+            CREATE TABLE users (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                name NVARCHAR(255) NOT NULL,
+                email NVARCHAR(255) NOT NULL UNIQUE,
+                password_hash NVARCHAR(255) NOT NULL,
+                role NVARCHAR(20) NOT NULL DEFAULT 'rep' CHECK (role IN ('rep','manager'))
+            )
+        END""",
+        """IF OBJECT_ID(N'dbo.companies', N'U') IS NULL
+        BEGIN
+            CREATE TABLE companies (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                name NVARCHAR(255) NOT NULL,
+                industry NVARCHAR(255),
+                website NVARCHAR(255),
+                notes NVARCHAR(MAX),
+                owner_id INT NOT NULL CONSTRAINT FK_companies_owner FOREIGN KEY REFERENCES users(id)
+            )
+        END""",
+        """IF OBJECT_ID(N'dbo.contacts', N'U') IS NULL
+        BEGIN
+            CREATE TABLE contacts (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                name NVARCHAR(255) NOT NULL,
+                email NVARCHAR(255),
+                phone NVARCHAR(50),
+                title NVARCHAR(255),
+                company_id INT NOT NULL CONSTRAINT FK_contacts_company FOREIGN KEY REFERENCES companies(id) ON DELETE CASCADE,
+                owner_id INT NOT NULL CONSTRAINT FK_contacts_owner FOREIGN KEY REFERENCES users(id)
+            )
+        END""",
+        """IF OBJECT_ID(N'dbo.pipeline_stages', N'U') IS NULL
+        BEGIN
+            CREATE TABLE pipeline_stages (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                name NVARCHAR(100) NOT NULL UNIQUE,
+                sort_order INT NOT NULL
+            )
+        END""",
+        """IF OBJECT_ID(N'dbo.deals', N'U') IS NULL
+        BEGIN
+            CREATE TABLE deals (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                title NVARCHAR(255) NOT NULL,
+                company_id INT CONSTRAINT FK_deals_company FOREIGN KEY REFERENCES companies(id),
+                contact_id INT CONSTRAINT FK_deals_contact FOREIGN KEY REFERENCES contacts(id),
+                value DECIMAL(12,2) NOT NULL DEFAULT 0,
+                stage_id INT NOT NULL CONSTRAINT FK_deals_stage FOREIGN KEY REFERENCES pipeline_stages(id),
+                owner_id INT NOT NULL CONSTRAINT FK_deals_owner FOREIGN KEY REFERENCES users(id)
+            )
+        END""",
+        """IF OBJECT_ID(N'dbo.deal_stage_history', N'U') IS NULL
+        BEGIN
+            CREATE TABLE deal_stage_history (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                deal_id INT NOT NULL CONSTRAINT FK_history_deal FOREIGN KEY REFERENCES deals(id) ON DELETE CASCADE,
+                from_stage_id INT CONSTRAINT FK_history_from_stage FOREIGN KEY REFERENCES pipeline_stages(id),
+                to_stage_id INT NOT NULL CONSTRAINT FK_history_to_stage FOREIGN KEY REFERENCES pipeline_stages(id),
+                changed_by INT NOT NULL CONSTRAINT FK_history_user FOREIGN KEY REFERENCES users(id),
+                changed_at DATETIME2 NOT NULL DEFAULT GETDATE()
+            )
+        END""",
+        """IF OBJECT_ID(N'dbo.activities', N'U') IS NULL
+        BEGIN
+            CREATE TABLE activities (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                deal_id INT CONSTRAINT FK_activities_deal FOREIGN KEY REFERENCES deals(id) ON DELETE CASCADE,
+                contact_id INT CONSTRAINT FK_activities_contact FOREIGN KEY REFERENCES contacts(id) ON DELETE CASCADE,
+                activity_type NVARCHAR(20) NOT NULL CHECK (activity_type IN ('call','email','note','meeting')),
+                body NVARCHAR(MAX) NOT NULL,
+                author_id INT NOT NULL CONSTRAINT FK_activities_author FOREIGN KEY REFERENCES users(id),
+                created_at DATETIME2 NOT NULL DEFAULT GETDATE()
+            )
+        END""",
+        ]
+    for stmt in statements:
+        db_module.query(stmt)
+    db_module.commit()
 
 
 def seed_db():
-    init_db(); db = get_db()
+    init_db()
+    db = get_db()
     if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         return
     db.executemany("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,?)", [
@@ -142,13 +310,17 @@ def dashboard():
     db = get_db(); where, params = owned_clause("deals")
     stage_counts = db.execute(f"""SELECT pipeline_stages.name, COUNT(deals.id) count FROM pipeline_stages
         LEFT JOIN deals ON deals.stage_id=pipeline_stages.id {'AND deals.owner_id=?' if where else ''}
-        GROUP BY pipeline_stages.id ORDER BY pipeline_stages.sort_order""", params).fetchall()
-    total_value = db.execute(f"SELECT COALESCE(SUM(value),0) FROM deals{where}", params).fetchone()[0]
+        GROUP BY pipeline_stages.id, pipeline_stages.name, pipeline_stages.sort_order
+        ORDER BY pipeline_stages.sort_order""", params).fetchall()
+    total_value_row = db.execute(f"SELECT COALESCE(SUM(value),0) AS total_value FROM deals{where}", params).fetchone()
     company_where, company_params = owned_clause("companies")
     contact_where, contact_params = owned_clause("contacts")
-    return render_template("dashboard.html", stage_counts=stage_counts, total_value=total_value,
-                           company_count=db.execute(f"SELECT COUNT(*) FROM companies{company_where}", company_params).fetchone()[0],
-                           contact_count=db.execute(f"SELECT COUNT(*) FROM contacts{contact_where}", contact_params).fetchone()[0])
+    company_count_row = db.execute(f"SELECT COUNT(*) AS company_count FROM companies{company_where}", company_params).fetchone()
+    contact_count_row = db.execute(f"SELECT COUNT(*) AS contact_count FROM contacts{contact_where}", contact_params).fetchone()
+    return render_template("dashboard.html", stage_counts=stage_counts,
+                           total_value=total_value_row["total_value"] if total_value_row else 0,
+                           company_count=company_count_row["company_count"] if company_count_row else 0,
+                           contact_count=contact_count_row["contact_count"] if contact_count_row else 0)
 
 
 @app.route("/companies")
