@@ -248,6 +248,9 @@ def login_required(view):
 
 @app.before_request
 def load_user():
+    if not app.config.get("DB_INITIALIZED"):
+        seed_db()
+        app.config["DB_INITIALIZED"] = True
     user_id = session.get("user_id")
     g.user = get_db().execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone() if user_id else None
 
@@ -464,5 +467,7 @@ def save_activity():
 
 
 if __name__ == "__main__":
-    with app.app_context(): seed_db()
+    with app.app_context():
+        seed_db()
+    app.config["DB_INITIALIZED"] = True
     app.run(debug=os.environ.get("FLASK_DEBUG") == "1")
